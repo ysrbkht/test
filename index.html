@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مصحف خط اندوپاک ۱۵ سطری (با فایل‌های docx)</title>
+    <style>
+        @font-face {
+            font-family: 'DigitalKhatt';
+            src: url('DigitalKhattV2.otf') format('opentype');
+        }
+        body {
+            background: #2e2e2e;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: 'DigitalKhatt', 'Traditional Arabic', 'Amiri', serif;
+            padding: 20px;
+            margin: 0;
+        }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+            direction: ltr;
+        }
+        .controls input, .controls button {
+            font-size: 18px;
+            padding: 8px 16px;
+            font-family: sans-serif;
+        }
+        .page-container {
+            background: #fef7e0;
+            width: 800px;
+            min-height: 1100px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 30px 40px;
+            box-sizing: border-box;
+            direction: rtl;
+        }
+        .line {
+            font-size: 26px;
+            line-height: 1.7;
+            margin: 8px 0;
+            text-align: justify;
+            word-spacing: 2px;
+            font-family: 'DigitalKhatt', 'Traditional Arabic', 'Amiri', serif;
+        }
+        .line.center {
+            text-align: center;
+        }
+        .surah-name {
+            font-size: 32px;
+            font-weight: bold;
+            color: #2c5f2d;
+            margin: 20px 0;
+            text-align: center;
+        }
+        .basmallah {
+            font-size: 30px;
+            color: #8b5a2b;
+            text-align: center;
+            margin: 15px 0;
+        }
+        .info {
+            margin-top: 20px;
+            text-align: center;
+            font-family: sans-serif;
+            direction: ltr;
+            color: #333;
+        }
+        .error {
+            color: red;
+            background: #ffe0e0;
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            text-align: center;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            font-family: sans-serif;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mammoth@1.4.2/mammoth.browser.min.js"></script>
+</head>
+<body>
+
+<div class="controls">
+    <label>فایل دیتابیس (db):</label>
+    <input type="file" id="dbFile" accept=".db">
+    <label>شماره صفحه:</label>
+    <input type="number" id="pageNum" value="1" min="1" max="610">
+    <button id="renderBtn">نمایش صفحه</button>
+</div>
+
+<div class="page-container" id="pageContent">
+    <div style="text-align:center; padding:50px;">لطفاً فایل دیتابیس را انتخاب کنید.</div>
+</div>
+
+<script>
+    let db = null;
+    let SQL = null;
+
+    // بارگذاری sql.js
+    const sqlPromise = initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}` });
+
+    document.getElementById('dbFile').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const arrayBuffer = await file.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        SQL = await sqlPromise;
+        db = new SQL.Database(uint8Array);
+        alert('دیتابیس با موفقیت بارگذاری شد. حالا می‌توانید صفحه را ببینید.');
+        
+        // بررسی وجود جدول pages
+        try {
+            const test = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='pages'");
+            if (test.length === 0) alert('جدول pages در دیتابیس پیدا نشد!');
+        } catch(e) { alert('خطا در خواندن دیتابیس: '+e.message); }
+    });
+
+    // تابع برای خواندن متن یک فایل docx و تبدیل به آرایه خطوط (بر اساس newline)
+    async function loadDocxLines(pageNumber) {
+        const url = `pages/${pageNumber}.docx`;  // مسیر نسبی پوشه pages
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`فایل ${pageNumber}.docx یافت نشد`);
+            const arrayBuffer = await response.arrayBuffer();
+            const result = await mammoth.extractRawText({ arrayBuffer: arrayBuffer });
+            const fullText = result.value;
+            // تقسیم متن به خطوط (هر خط با Enter جدا شده)
+            let lines = fullText.split(/\r?\n/);
+            // حذف خطوط خالی از اول و آخر
+            lines = lines.filter(line => line.trim().length > 0);
+            return lines;
+        } catch (err) {
+            console.error(err);
+            return null;
+        }
+    }
+
+    async function renderPage(pageNumber) {
+        const container = document.getElementById('pageContent');
+        if (!db) {
+            container.innerHTML = '<div class="error">ابتدا فایل دیتابیس را انتخاب کنید.</div>';
+            return;
+        }
+
+        try {
+            // 1. گرفتن تمام سطرهای صفحه از دیتابیس
+            const stmt = db.prepare("SELECT line_number, line_type, is_centered, first_word_id, last_word_id, surah_number FROM pages WHERE page_number = ? ORDER BY line_number");
+            stmt.bind([pageNumber]);
+            const linesInfo = [];
+            while (stmt.step()) {
+                const row = stmt.getAsObject();
+                linesInfo.push(row);
+            }
+            stmt.free();
+
+            if (linesInfo.length === 0) {
+                container.innerHTML = `<div class="error">صفحه ${pageNumber} در دیتابیس یافت نشد.</div>`;
+                return;
+            }
+
+            // 2. بارگذاری خطوط از فایل docx (فقط برای سطرهای ayah نیاز داریم)
+            let docxLines = null;
+            // بررسی کنیم آیا اصلاً سطر ayah وجود دارد؟
+            const hasAyah = linesInfo.some(line => line.line_type === 'ayah');
+            if (hasAyah) {
+                container.innerHTML = '<div class="loading">در حال بارگذاری فایل docx صفحه...</div>';
+                docxLines = await loadDocxLines(pageNumber);
+                if (!docxLines) {
+                    container.innerHTML = `<div class="error">خطا: فایل pages/${pageNumber}.docx یافت نشد یا قابل خواندن نیست. لطفاً مطمئن شوید پوشه pages در کنار این فایل HTML وجود دارد و فایل ${pageNumber}.docx داخل آن است.</div>`;
+                    return;
+                }
+                // تعداد خطوط docx باید با تعداد سطرهای ayah در دیتابیس برابر باشد (یا بیشتر)
+                const ayahLinesCount = linesInfo.filter(l => l.line_type === 'ayah').length;
+                if (docxLines.length < ayahLinesCount) {
+                    console.warn(`تعداد خطوط docx (${docxLines.length}) کمتر از خطوط ayah (${ayahLinesCount}) است. ممکن است تطابق خطوط صحیح نباشد.`);
+                }
+            }
+
+            // 3. ساخت HTML صفحه
+            let html = `<div class="page-header" style="text-align:center; margin-bottom:30px;">صفحه ${pageNumber}</div>`;
+            let ayahIndex = 0;  // شمارنده برای گرفتن خط بعدی از docxLines
+
+            for (let line of linesInfo) {
+                let text = '';
+                let extraClass = '';
+
+                if (line.line_type === 'surah_name') {
+                    let surahName = `سوره ${line.surah_number}`;
+                    // تلاش برای خواندن نام سوره از دیتابیس (اگر جدول surah_names باشد)
+                    try {
+                        const res = db.exec("SELECT arabic_name FROM surah_names WHERE id = ?", [line.surah_number]);
+                        if (res.length > 0 && res[0].values.length > 0) {
+                            surahName = res[0].values[0][0];
+                        }
+                    } catch(e) {}
+                    text = surahName;
+                    extraClass = 'surah-name';
+                } 
+                else if (line.line_type === 'basmallah') {
+                    text = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ";
+                    extraClass = 'basmallah';
+                }
+                else if (line.line_type === 'ayah') {
+                    if (docxLines && ayahIndex < docxLines.length) {
+                        text = docxLines[ayahIndex];
+                        ayahIndex++;
+                    } else {
+                        text = "【 متن خط یافت نشد 】";
+                    }
+                }
+                else {
+                    text = ''; // ناشناخته
+                }
+
+                const alignClass = (line.is_centered === 1 || line.is_centered === true) ? 'center' : '';
+                const lineClass = `line ${alignClass} ${extraClass}`;
+                html += `<div class="${lineClass}">${text}</div>`;
+            }
+
+            container.innerHTML = html;
+        } catch(err) {
+            container.innerHTML = `<div class="error">خطا در رندر صفحه: ${err.message}</div>`;
+            console.error(err);
+        }
+    }
+
+    document.getElementById('renderBtn').addEventListener('click', () => {
+        const page = parseInt(document.getElementById('pageNum').value, 10);
+        if (isNaN(page)) return;
+        renderPage(page);
+    });
+
+    // تلاش برای بارگذاری فونت
+    const fontTest = new FontFace('DigitalKhatt', 'url(DigitalKhattV2.otf)');
+    fontTest.load().then(() => {
+        document.fonts.add(fontTest);
+        console.log('فونت DigitalKhatt بارگذاری شد');
+    }).catch(e => console.warn('فونت پیدا نشد، از فونت پیش‌فرض استفاده می‌شود', e));
+</script>
+</body>
+</html>
